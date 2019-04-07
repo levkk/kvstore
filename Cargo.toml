@@ -1,0 +1,7 @@
+[package]
+name = "kvstore"
+version = "0.1.0"
+authors = ["Lev <lev.kokotov@gmail.com>"]
+edition = "2018"
+
+[dependencies]
