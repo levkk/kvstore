@@ -1,44 +1,77 @@
+// Input/output
+use std::io::{Read, Write, ErrorKind};
 
-use std::io::{Write, Read};
+// Networking
 use std::net::{TcpListener, TcpStream};
-use std::thread;
 
-const OP_MAX_LEN: usize = 24;
-const CHAR_SPACE: char = ' ';
+// Time
+use std::time::{SystemTime};
 
-
+/// Entry point
 fn main() {
-    println!("Hello, world!");
+    println!("Hi, I'm the new Redis! Waiting for connections...");
+    server("localhost:9999");
 }
 
+/// Controls logging (can adjust level globally, i.e. debug, info, etc.)
+fn log(msg: &str) {
+    println!("{}", msg);
+}
+
+/// Listen for connections and handle new clients
 fn server(url: &str) {
+    // TCP socket
     let listener = TcpListener::bind(url)
-        .expect(&format!("Cannot bind on {}", url));
+        .expect(&format!("Cannot bind on {}. Maybe the port is already in use?", url));
 
+    // Do not block on accept()
+    listener.set_nonblocking(true)
+        .expect("The OS does not support non-blocking sockets which are required.");
+
+    // Store all connections in here
+    let mut connections_manager = ConnectionManager{
+        connections: vec![],
+    };
+
+    // Accept new connections
     for stream in listener.incoming() {
-        thread::spawn(|| {
-            match stream {
-                Ok(stream) => handle_client(stream),
-                Err(err) => println!("Accept error: {}", err)
-            }
-            // let mut buffer = [0u8; 4096];
-            // let buffer = stream.read(&mut buffer).unwrap();
-        });
+        match stream {
+            Ok(stream) => connections_manager.handle_new_client(stream),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+            Err(_e) => panic!("IO error in listener.incoming() ! Catastrophic failure. Shutting down."),
+        }
     }
 }
 
-fn handle_client(mut stream: TcpStream) {
-    let mut buf = [0u8; 4096];
-    let mut op = [0u8; OP_MAX_LEN];
 
-    stream.read(&mut buf)
-        .expect("Could not read stream info buffer.");
+/// Manages all connections
+struct ConnectionManager {
+    connections: Vec<Connection>, 
+}
 
-    for (c, i) in buf.iter().enumerate() {
+impl ConnectionManager {
 
+    /// Handle the new client
+    fn handle_new_client(&mut self, mut stream: TcpStream) {
+        // Set the connection as non-blocking
+        stream.set_nonblocking(true)
+            .expect("Could not set incoming stream to non-blocking.");
+
+        log("New client");
+
+        // Abstract the connection
+        let connection = Connection{
+            stream: stream,
+            last_active: SystemTime::now(),
+        };
+
+        // Let someone else handle this later
+        self.connections.push(connection);
     }
 }
 
-// fn determine_op(cmd: &str) -> Op {
-
-// }
+/// Connection abstraction
+struct Connection {
+    stream: TcpStream,
+    last_active: SystemTime,
+}
