@@ -5,11 +5,14 @@ use std::io::{Read, Write, ErrorKind};
 use std::net::{TcpListener, TcpStream};
 
 // Time
-use std::time::{SystemTime};
+use std::time::{SystemTime, Duration};
+
+// Sleep
+use std::thread::sleep;
 
 /// Entry point
 fn main() {
-    println!("Hi, I'm the new Redis! Waiting for connections...");
+    log("Hi, I'm the new Redis! Waiting for connections...");
     server("localhost:9999");
 }
 
@@ -33,13 +36,20 @@ fn server(url: &str) {
         connections: vec![],
     };
 
-    // Accept new connections
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => connections_manager.handle_new_client(stream),
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+    // Main loop
+    loop {
+        // Async, so it won't block if no new connections are waiting
+        match listener.accept() {
+            Ok((stream, _addr)) => connections_manager.handle_new_client(stream),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => (),
             Err(_e) => panic!("IO error in listener.incoming() ! Catastrophic failure. Shutting down."),
-        }
+        };
+
+        // All connections are async here as well, so won't block unless it has to read/write
+        connections_manager.service_connections();
+
+        // Not waste wild CPU cycles
+        sleep(Duration::from_millis(1));
     }
 }
 
@@ -63,10 +73,41 @@ impl ConnectionManager {
         let connection = Connection{
             stream: stream,
             last_active: SystemTime::now(),
+            state: ConnectionState::WaitForWrite,
+            buf: vec![],
         };
 
         // Let someone else handle this later
         self.connections.push(connection);
+    }
+
+    /// Service all connections
+    fn service_connections(&mut self) {
+        for mut connection in self.connections.iter_mut() {
+            Self::service_connection(&mut connection);
+        }
+    }
+
+    /// Service specific connection
+    fn service_connection(connection: &mut Connection) -> Result<usize, ()> {
+        match connection.state {
+            ConnectionState::WaitForRead => {
+                match connection.stream.read_to_end(&mut connection.buf) {
+                    Ok(n) => {
+                        log(&format!("Read {} bytes", n));
+                        Ok(n)
+                    },
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
+                    Err(e) => Err(()),
+                }
+            },
+            ConnectionState::WaitForWrite => {
+                connection.stream.write(&connection.buf);
+                connection.state = ConnectionState::WaitForRead;
+
+                Ok(0)
+            },
+        }
     }
 }
 
@@ -74,4 +115,11 @@ impl ConnectionManager {
 struct Connection {
     stream: TcpStream,
     last_active: SystemTime,
+    state: ConnectionState,
+    buf: Vec<u8>,
+}
+
+enum ConnectionState {
+    WaitForRead,
+    WaitForWrite,
 }
