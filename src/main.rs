@@ -10,6 +10,9 @@ use std::time::{SystemTime, Duration};
 // Sleep
 use std::thread::sleep;
 
+// Hash
+use std::collections::HashMap;
+
 /// Entry point
 fn main() {
     log("Hi, I'm the new Redis! Waiting for connections...");
@@ -56,7 +59,7 @@ fn server(url: &str) {
 
 /// Manages all connections
 struct ConnectionManager {
-    connections: Vec<Connection>, 
+    connections: Vec<Connection>,
 }
 
 impl ConnectionManager {
@@ -91,23 +94,53 @@ impl ConnectionManager {
     /// Service specific connection
     fn service_connection(connection: &mut Connection) -> Result<usize, ()> {
         match connection.state {
-            ConnectionState::WaitForRead => {
-                match connection.stream.read_to_end(&mut connection.buf) {
-                    Ok(n) => {
-                        log(&format!("Read {} bytes", n));
-                        Ok(n)
-                    },
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
-                    Err(e) => Err(()),
-                }
-            },
-            ConnectionState::WaitForWrite => {
-                connection.stream.write(&connection.buf);
-                connection.state = ConnectionState::WaitForRead;
-
+            ConnectionState::WaitForRead => Self::read_connection(connection),
+            ConnectionState::WaitForWrite => Self::write_connection(connection),
+            ConnectionState::WaitForOp => {
                 Ok(0)
             },
         }
+    }
+
+    fn read_connection(connection: &mut Connection) -> Result<usize, ()> {
+        match connection.stream.read_to_end(&mut connection.buf) {
+            // Read successful
+            Ok(n) => {
+                log(&format!("Read {} bytes", n));
+
+                if Self::end_of_message(&connection.buf) {
+                    connection.state = ConnectionState::WaitForOp;
+                }
+
+                Ok(n)
+            },
+
+            // Socket not ready
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
+
+            // I/O error
+            Err(e) => Err(()),
+        }
+    }
+
+    fn write_connection(connection: &mut Connection) -> Result<usize, ()> {
+        match connection.stream.write_all(&connection.buf) {
+            Ok(_) => {
+                let len = connection.buf.len();
+                connection.buf.clear();
+                connection.state = ConnectionState::WaitForRead;
+                Ok(len)
+            },
+            Err(_err) => Err(()),
+        }
+    }
+
+    fn parse_op(buf: &Vec<u8>) {
+        
+    }
+
+    fn end_of_message(buf: &Vec<u8>) -> bool {
+        buf.contains(&('\r' as u8))
     }
 }
 
@@ -121,5 +154,37 @@ struct Connection {
 
 enum ConnectionState {
     WaitForRead,
+    WaitForOp,
     WaitForWrite,
 }
+
+struct Store {
+    dict: HashMap<String, Value>,
+}
+
+impl Store {
+    fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        match value.chars().nth(0).unwrap() {
+            ':' => {},
+            _ => {},
+        };
+
+        Ok(())
+    }
+}
+
+struct Value {
+    value_type: ValueType,
+    integer_value: u64,
+    raw_string_value: String,
+    array: Vec<u64>,
+}
+
+enum ValueType {
+    Integer,
+    RawString,
+    // Array,
+}
+
+
+
