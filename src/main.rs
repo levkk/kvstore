@@ -1,8 +1,10 @@
+#![feature(bind_by_move_pattern_guards)]
+
 // Input/output
 use std::io::{Read, Write, ErrorKind};
 
 // Networking
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, Shutdown};
 
 // Time
 use std::time::{SystemTime, Duration};
@@ -37,6 +39,7 @@ fn server(url: &str) {
     // Store all connections in here
     let mut connections_manager = ConnectionManager{
         connections: vec![],
+        closed_connections: vec![],
     };
 
     // Main loop
@@ -60,6 +63,7 @@ fn server(url: &str) {
 /// Manages all connections
 struct ConnectionManager {
     connections: Vec<Connection>,
+    closed_connections: Vec<usize>,
 }
 
 impl ConnectionManager {
@@ -78,6 +82,7 @@ impl ConnectionManager {
             last_active: SystemTime::now(),
             state: ConnectionState::WaitForWrite,
             buf: vec![],
+            offset: 0,
         };
 
         // Let someone else handle this later
@@ -86,30 +91,54 @@ impl ConnectionManager {
 
     /// Service all connections
     fn service_connections(&mut self) {
-        for mut connection in self.connections.iter_mut() {
-            Self::service_connection(&mut connection);
+        for (idx, mut connection) in self.connections.iter_mut().enumerate() {
+            match Self::service_connection(idx, &mut connection) {
+                Ok(_n) => (),
+                Err(err) if err == ConnectionState::Closed => {
+                    self.closed_connections.push(idx);
+                },
+                Err(_) => (),
+            };
         }
+
+        for idx in self.closed_connections.iter() {
+            self.connections[*idx].stream.shutdown(Shutdown::Both);
+            self.connections.remove(*idx);
+
+            log(&format!("Shutdown connection {}", *idx));
+        }
+
+        self.closed_connections.clear();
     }
 
     /// Service specific connection
-    fn service_connection(connection: &mut Connection) -> Result<usize, ()> {
+    fn service_connection(idx: usize, connection: &mut Connection) -> Result<usize, ConnectionState> {
         match connection.state {
             ConnectionState::WaitForRead => Self::read_connection(connection),
             ConnectionState::WaitForWrite => Self::write_connection(connection),
             ConnectionState::WaitForOp => {
                 Ok(0)
             },
+            ConnectionState::Closed => Err(ConnectionState::Closed),
         }
     }
 
-    fn read_connection(connection: &mut Connection) -> Result<usize, ()> {
-        match connection.stream.read_to_end(&mut connection.buf) {
+    fn read_connection(connection: &mut Connection) -> Result<usize, ConnectionState> {
+        match connection.stream.read(&mut connection.buf[connection.offset..]) {
             // Read successful
+            Ok(n) if n == 0 => {
+                // connection.state = ConnectionState::Closed;
+                Ok(0)
+            },
+
             Ok(n) => {
+                //
+                connection.offset = n;
                 log(&format!("Read {} bytes", n));
 
                 if Self::end_of_message(&connection.buf) {
                     connection.state = ConnectionState::WaitForOp;
+                    connection.offset = 0;
                 }
 
                 Ok(n)
@@ -119,19 +148,22 @@ impl ConnectionManager {
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
 
             // I/O error
-            Err(e) => Err(()),
+            Err(e) => Err(ConnectionState::Closed),
         }
     }
 
-    fn write_connection(connection: &mut Connection) -> Result<usize, ()> {
-        match connection.stream.write_all(&connection.buf) {
-            Ok(_) => {
-                let len = connection.buf.len();
-                connection.buf.clear();
+    fn write_connection(connection: &mut Connection) -> Result<usize, ConnectionState> {
+        match connection.stream.write(&connection.buf[connection.offset..]) {
+            Ok(n) if n == 0 => {
+                connection.offset = 0;
                 connection.state = ConnectionState::WaitForRead;
-                Ok(len)
+                Ok(0)
             },
-            Err(_err) => Err(()),
+            Ok(n) => {
+                connection.offset = n;
+                Ok(n)
+            },
+            Err(_err) => Err(ConnectionState::Closed),
         }
     }
 
@@ -150,12 +182,15 @@ struct Connection {
     last_active: SystemTime,
     state: ConnectionState,
     buf: Vec<u8>,
+    offset: usize,
 }
 
+#[derive(PartialEq)]
 enum ConnectionState {
     WaitForRead,
     WaitForOp,
     WaitForWrite,
+    Closed,
 }
 
 struct Store {
